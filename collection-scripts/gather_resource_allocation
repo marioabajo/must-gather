@@ -5,7 +5,7 @@ RESOURCE_ALLOCATION_PATH=${BASE_COLLECTION_PATH}/resource_allocation
 
 mkdir -p "${RESOURCE_ALLOCATION_PATH}"/
 
-# Extract all the resource limits, alocations and node subnets and store it in a json
+# Collect all the resource limits, alocations and node subnets and store it in a json
 oc get pods -A -o json | \
   jq -r '.items[] | select (.status.phase != "Succeeded" and .status.phase != "Failed") | ((.spec.nodeName // "(non-scheduled)") + " " + .metadata.namespace + "/" + .metadata.name + " " + (.spec.containers[] | (.resources.requests.cpu // "0") + " " + (.resources.requests.memory // "0") + " " + (.resources.limits.cpu // "0") + " " + (.resources.limits.memory // "0")))' | \
   awk '
@@ -48,10 +48,25 @@ oc get pods -A -o json | \
             ,num_convert(nodes[n]["memr"],"Mi")"Mi" ,nodes[n]["memr"]*100/num_convert(alloc[n][2],1) ,num_convert(nodes[n]["meml"],"Mi")"Mi"\
             ,nodes[n]["meml"]*100/num_convert(alloc[n][2],1) ,alloc[n][3] ,length(pods[n])
       }
-    }' \
-| column -s "|" -J -n "node_resources" -N "node,cpu_alloc,cpu_req,cpu_req_per,cpu_lim,cpu_lim_per,mem_alloc,mem_req,mem_req_per,mem_lim,mem_lim_per,pods_alloc,pods_count"  > ${RESOURCE_ALLOCATION_PATH}/node_resources.json
+    }' | \
+  column -s "|" -J -n "node_resources" -N "node,cpu_alloc,cpu_req,cpu_req_per,cpu_lim,cpu_lim_per,mem_alloc,mem_req,mem_req_per,mem_lim,mem_lim_per,pods_alloc,pods_count" | jq -c  > ${RESOURCE_ALLOCATION_PATH}/node_resources.json
 
+# Collect info from all containers, obfuscating custom namespaces, pods and container names
+oc get pods -A -o json | \
+  jq -r '(.items[] | . as $ROOT | $ROOT.status.containerStatuses // [] | .[] | . as $CONTAINER_STATUS | [$ROOT.spec.nodeName // "-", $ROOT.metadata.namespace, $ROOT.metadata.name, $ROOT.status.phase, $CONTAINER_STATUS.name, $CONTAINER_STATUS.ready, $CONTAINER_STATUS.state.running.startedAt // "-", $CONTAINER_STATUS.lastState.terminated.exitCode // "-" , $CONTAINER_STATUS.lastState.terminated.finishedAt // "-", $CONTAINER_STATUS.lastState.terminated.reason // "-", $CONTAINER_STATUS.state.terminated.exitCode // "-", $CONTAINER_STATUS.restartCount // "-", ($ROOT.spec.containers[] | select(.name==$CONTAINER_STATUS.name) | (.resources.requests.cpu|tostring), (.resources.requests.memory|tostring), (.resources.limits.cpu|tostring), (.resources.limits.memory|tostring))]) | @tsv' | \
+  awk '
+    function sha256(a) {
+      cmd="echo "a" | sha256sum"
+      cmd | getline b
+      split(b, sha, " ")
+      close(cmd)
+      return sha[1]
+    }
+    {
+      print $1,sha256($2),sha256($3),$4,sha256($5),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
+    }' | \
+  column -J -n "containers_data" --table-columns "node_name","namespace_name","pod_name","pod_phase","container_name","container_readiness","started_at","previous_exit_code","previous_finished_at","reason","exit_code","restarts","cpu_requests","mem_requests","cpu_limits","mem_limits" | jq -c > ${RESOURCE_ALLOCATION_PATH}/container_resources.json
 
-# Extract the output of "oc adm top nodes" in json format
+# Collect the output of "oc adm top nodes" in json format
 oc adm top nodes | column -J -n "top_nodes" --table-columns "node_name","cpu_cores","cpu_%","mem_bytes","mem_%" | jq -c > ${RESOURCE_ALLOCATION_PATH}/top_nodes.json
 
