@@ -1,9 +1,13 @@
 #!/bin/bash 
 
+set -o pipefail
+
 BASE_COLLECTION_PATH="must-gather"
 RESOURCE_ALLOCATION_PATH=${BASE_COLLECTION_PATH}/resource_allocation
 
 mkdir -p "${RESOURCE_ALLOCATION_PATH}"/
+
+PIDS=()
 
 # Collect all the resource limits, alocations and node subnets and store it in a json
 oc get pods -A -o json | \
@@ -49,7 +53,8 @@ oc get pods -A -o json | \
             ,nodes[n]["meml"]*100/num_convert(alloc[n][2],1) ,alloc[n][3] ,length(pods[n])
       }
     }' | \
-  column -s "|" -J -n "node_resources" -N "node,cpu_alloc,cpu_req,cpu_req_per,cpu_lim,cpu_lim_per,mem_alloc,mem_req,mem_req_per,mem_lim,mem_lim_per,pods_alloc,pods_count" | jq -c  > ${RESOURCE_ALLOCATION_PATH}/node_resources.json
+  column -s "|" -J -n "node_resources" -N "node,cpu_alloc,cpu_req,cpu_req_per,cpu_lim,cpu_lim_per,mem_alloc,mem_req,mem_req_per,mem_lim,mem_lim_per,pods_alloc,pods_count" | jq -c  > ${RESOURCE_ALLOCATION_PATH}/node_resources.json &
+PIDS+=($!)
 
 # Collect info from all containers, obfuscating custom namespaces, pods and container names
 oc get pods -A -o json | \
@@ -63,12 +68,13 @@ oc get pods -A -o json | \
       return sha[1]
     }
     {
-      if ($2 ~ "openshift-*|kube-*|default")
+      if ($2 ~ "openshift*|kube-*|default")
         print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
       else
         print $1,sha256($2),sha256($3),$4,sha256($5),$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
     }' | \
-  column -J -n "containers_data" --table-columns "node_name","namespace_name","pod_name","pod_phase","container_name","container_readiness","started_at","previous_exit_code","previous_finished_at","reason","exit_code","restarts","cpu_requests","mem_requests","cpu_limits","mem_limits" | jq -c > ${RESOURCE_ALLOCATION_PATH}/container_resources.json
+  column -J -n "containers_data" --table-columns "node_name","namespace_name","pod_name","pod_phase","container_name","container_readiness","started_at","previous_exit_code","previous_finished_at","reason","exit_code","restarts","cpu_requests","mem_requests","cpu_limits","mem_limits" | jq -c > ${RESOURCE_ALLOCATION_PATH}/container_resources.json &
+PIDS+=($!)
 
 # Collect the output of "oc adm top nodes" in json format
 oc get --raw /apis/metrics.k8s.io/v1beta1/nodes | jq -r '.items[] | .metadata.name + " " + .usage.cpu + " " + .usage.memory' | awk '
@@ -102,5 +108,12 @@ oc get --raw /apis/metrics.k8s.io/v1beta1/nodes | jq -r '.items[] | .metadata.na
       for (i in node){
         printf "%s|%.0fm|%.0f%%|%sMi|%.0f%%\n",i,node[i]["cpu"],node[i]["cpu"]*100/alloc[i][1],num_convert(node[i]["mem"]"Ki","Mi"),node[i]["mem"]*100/alloc[i][2]
       }
-    }' | column -J -s "|" -n "top_nodes" -N "node,cpu,cpu_per,mem,mem_per" | jq -c > ${RESOURCE_ALLOCATION_PATH}/top_nodes.json
+    }' | column -J -s "|" -n "top_nodes" -N "node,cpu,cpu_per,mem,mem_per" | jq -c > ${RESOURCE_ALLOCATION_PATH}/top_nodes.json &
+PIDS+=($!)
 
+echo "INFO: Waiting for resources info collection to complete ..."
+wait "${PIDS[@]}"
+echo "INFO: Done collecting resources information"
+
+# force disk flush to ensure that all data gathered is accessible in the copy container
+sync
